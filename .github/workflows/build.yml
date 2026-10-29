@@ -1,0 +1,72 @@
+# Build Windows and macOS versions and publish them to a GitHub Release.
+# Trigger: push a tag like v1.1.0 (or run manually from the Actions tab to build without releasing).
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest  # HotkeyTimer.exe
+          - macos-latest    # Apple Silicon (M1/M2/M3/M4)
+          - macos-15-intel  # Intel Mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: echo.| build.bat
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: sh build_mac.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HotkeyTimer-${{ matrix.os }}
+          path: |
+            dist/HotkeyTimer.exe
+            dist/HotkeyTimer-mac-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # Publish whatever built successfully, even if one platform failed
+    if: startsWith(github.ref, 'refs/tags/') && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            ## Download / 下載
+
+            | File / 檔案 | For / 適用 |
+            |---|---|
+            | `HotkeyTimer.exe` | Windows |
+            | `HotkeyTimer-mac-arm64.zip` | Mac with Apple Silicon (M1/M2/M3/M4) / Apple 晶片 Mac |
+            | `HotkeyTimer-mac-intel.zip` | Mac with Intel CPU / Intel 晶片 Mac |
+
+            See the README for first-run steps (Windows SmartScreen, macOS permissions).
+            首次執行步驟（Windows SmartScreen、macOS 權限）請參考 README。

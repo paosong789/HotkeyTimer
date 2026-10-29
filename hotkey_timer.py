@@ -14,16 +14,28 @@ import json
 import math
 import os
 import queue
+import re
+import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 import uuid
-import winsound
 from tkinter import messagebox, ttk
 
 from pynput import keyboard
 
-if getattr(sys, "frozen", False):
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+if IS_WIN:
+    import winsound
+
+if getattr(sys, "frozen", False) and IS_MAC:
+    # .app bundles are read-only; keep settings in Application Support
+    APP_DIR = os.path.expanduser("~/Library/Application Support/HotkeyTimer")
+    os.makedirs(APP_DIR, exist_ok=True)
+elif getattr(sys, "frozen", False):
     # Packaged exe: keep config.json next to the exe (not in the temp unpack dir)
     APP_DIR = os.path.dirname(sys.executable)
 else:
@@ -51,8 +63,8 @@ TEXT_SUB = "#8e93ad"
 ICON = "#8e93ad"
 ICON_HOVER = "#ffffff"
 
-FONT_UI = "Segoe UI"
-FONT_NUM = "Segoe UI"
+FONT_UI = "Segoe UI" if IS_WIN else "Helvetica Neue"
+FONT_NUM = FONT_UI
 
 # Cards are designed at width 200 and scaled proportionally to the window
 BASE_W = 200
@@ -72,7 +84,7 @@ def key_to_name(key):
     if isinstance(key, keyboard.Key):
         return key.name
     vk = getattr(key, "vk", None)
-    if vk is not None:
+    if IS_WIN and vk is not None:  # Windows virtual-key codes (macOS uses different codes)
         if 96 <= vk <= 105:
             return f"num{vk - 96}"
         # Use the virtual-key code for letters/digits so Ctrl/Shift don't change the name
@@ -102,12 +114,22 @@ def truncate(text, limit=12):
 
 
 class Speaker:
-    """Speak reminders with the built-in Windows voice (SAPI), preferring a Chinese voice."""
+    """Speak reminders with the system voice, preferring a Chinese voice.
+
+    Windows uses SAPI (pywin32); macOS uses the built-in `say` command.
+    """
 
     SVSF_ASYNC = 1
 
     def __init__(self):
-        self.voice = None
+        self.voice = None      # Windows SAPI voice object
+        self.say_queue = None  # macOS: queue consumed by a worker thread
+        if IS_WIN:
+            self._init_sapi()
+        elif IS_MAC:
+            self._init_mac()
+
+    def _init_sapi(self):
         try:
             import win32com.client
             self.voice = win32com.client.Dispatch("SAPI.SpVoice")
@@ -120,6 +142,36 @@ class Speaker:
         except Exception:
             self.voice = None
 
+    def _init_mac(self):
+        try:
+            out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True,
+                                 timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        # Each line looks like: "Meijia              zh_TW    # sample text"
+        names = {}
+        for line in out.splitlines():
+            m = re.match(r"^(.+?)\s+([a-z]{2}_[A-Z]{2})\s+#", line)
+            if m:
+                names.setdefault(m.group(2), []).append(m.group(1).strip())
+        self.mac_voice = None
+        for lang, preferred in (("zh_TW", "Meijia"), ("zh_CN", "Tingting"), ("zh_HK", "Sinji")):
+            if lang in names:
+                self.mac_voice = preferred if preferred in names[lang] else names[lang][0]
+                break
+        self.say_queue = queue.Queue()
+        threading.Thread(target=self._mac_worker, daemon=True).start()
+
+    def _mac_worker(self):
+        # Speak one reminder at a time so several timers don't talk over each other
+        while True:
+            text = self.say_queue.get()
+            cmd = ["say", text] if self.mac_voice is None else ["say", "-v", self.mac_voice, text]
+            try:
+                subprocess.run(cmd, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
     def say(self, text):
         if self.voice is not None:
             try:
@@ -127,8 +179,14 @@ class Speaker:
                 return
             except Exception:
                 pass
+        if self.say_queue is not None:
+            self.say_queue.put(text)
+            return
         # Fall back to a system sound when speech is unavailable
-        winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        if IS_WIN:
+            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        elif IS_MAC:
+            subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
 
 
 def round_rect(canvas, x1, y1, x2, y2, r, **kw):
@@ -143,6 +201,15 @@ def round_rect(canvas, x1, y1, x2, y2, r, **kw):
 def font(family, px, weight="normal"):
     """Font sized in pixels (negative size) so it scales with the card."""
     return (family, -max(7, int(px)), weight)
+
+
+def bind_context_menu(widget, callback):
+    """Bind the context-menu gesture: right-click, plus Control-click on macOS."""
+    if IS_MAC:
+        widget.bind("<Button-2>", callback)  # right-click / two-finger click on macOS Tk
+        widget.bind("<Control-Button-1>", callback)
+    else:
+        widget.bind("<Button-3>", callback)
 
 
 def make_icon(canvas, x, y, text, command, px):
@@ -176,7 +243,7 @@ class TimerCard:
 
         self.canvas = tk.Canvas(app.view, bg=BG, highlightthickness=0)
         self.canvas.bind("<Double-Button-1>", lambda e: SettingsDialog(app, self))
-        self.canvas.bind("<Button-3>", lambda e: app.show_menu(e, self))
+        bind_context_menu(self.canvas, lambda e: app.show_menu(e, self))
         self.width = 0
         self.resize(BASE_W)
 
@@ -419,10 +486,10 @@ class App:
         self.view = tk.Frame(root, bg=BG)
         self.view.pack(fill="both", expand=True)
         self.view.bind("<Configure>", lambda e: self.layout())
-        self.view.bind("<Button-3>", lambda e: self.show_menu(e))
+        bind_context_menu(self.view, lambda e: self.show_menu(e))
         self.empty = tk.Label(self.view, text="Right-click to add a timer",
                               bg=BG, fg=TEXT_SUB, font=(FONT_UI, 10))
-        self.empty.bind("<Button-3>", lambda e: self.show_menu(e))
+        bind_context_menu(self.empty, lambda e: self.show_menu(e))
 
         config = self.load()
         window = config.get("window", {})
