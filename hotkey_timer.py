@@ -1,12 +1,13 @@
-"""HotkeyTimer - 全域快捷鍵循環倒數計時器
+"""HotkeyTimer - looping countdown timers triggered by global hotkeys
 
-功能：
-- 可新增多個計時器，每個計時器可設定名稱、倒數秒數、觸發按鍵（單一按鍵）
-- 按下觸發按鍵（任何視窗下皆有效）即從目標秒數開始倒數
-- 倒數到 0 後自動從目標秒數重新開始，並播放提示音
-- 倒數中再按一次觸發按鍵，會從目標秒數重新開始
-- 停止 / 刪除只能用滑鼠操作，刪除前會再次確認
-- 設定自動儲存於 config.json
+Features:
+- Multiple timers, each with its own name, countdown seconds and trigger key (single key)
+- Pressing the trigger key (works in any window) starts counting down from the target
+- After reaching 0 the timer automatically restarts from the target
+- Pressing the trigger key again while running restarts from the target
+- Voice reminder at a configurable number of seconds left
+- Stop / delete are mouse-only; deleting asks for confirmation
+- Settings are saved to config.json automatically
 """
 
 import json
@@ -26,12 +27,12 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 MIN_SECONDS = 1
 MAX_SECONDS = 86400
-WARN_SECONDS = 10   # 剩餘秒數小於等於此值時以黃色顯示
-DEFAULT_NOTIFY = 10  # 預設剩幾秒時語音提醒
-DANGER_SECONDS = 5  # 剩餘秒數小於等於此值時以紅色顯示
+WARN_SECONDS = 10    # show yellow when this many seconds or fewer remain
+DEFAULT_NOTIFY = 10  # default seconds-left for the voice reminder
+DANGER_SECONDS = 5   # show red when this many seconds or fewer remain
 TICK_MS = 50
 
-# 外觀
+# Appearance
 BG = "#1b1d2a"
 CARD_BG = "#272a3b"
 CARD_BORDER = "#363a52"
@@ -45,31 +46,31 @@ TEXT_SUB = "#8e93ad"
 ICON = "#8e93ad"
 ICON_HOVER = "#ffffff"
 
-FONT_UI = "Microsoft JhengHei UI"
+FONT_UI = "Segoe UI"
 FONT_NUM = "Segoe UI"
 
-# 卡片以寬 200 為基準設計，實際大小依視窗等比例縮放
+# Cards are designed at width 200 and scaled proportionally to the window
 BASE_W = 200
-CARD_RATIO = 1.07  # 高 / 寬
+CARD_RATIO = 1.07  # height / width
 CARD_GAP = 10
 MIN_CARD_W = 60
 
-MIN_ALPHA = 20  # 透明度下限（%）
+MIN_ALPHA = 20  # minimum window opacity (%)
 
 
 # ---------------------------------------------------------------------------
-# 工具函式
+# Helpers
 # ---------------------------------------------------------------------------
 
 def key_to_name(key):
-    """將 pynput 的按鍵物件轉成穩定的字串名稱（例如 'f1'、'a'、'num5'）。"""
+    """Convert a pynput key into a stable string name (e.g. 'f1', 'a', 'num5')."""
     if isinstance(key, keyboard.Key):
         return key.name
     vk = getattr(key, "vk", None)
     if vk is not None:
         if 96 <= vk <= 105:
             return f"num{vk - 96}"
-        # 以虛擬鍵碼判斷英數字，避免按住 Ctrl/Shift 時字元改變
+        # Use the virtual-key code for letters/digits so Ctrl/Shift don't change the name
         if 65 <= vk <= 90 or 48 <= vk <= 57:
             return chr(vk).lower()
     char = getattr(key, "char", None)
@@ -82,12 +83,12 @@ def key_to_name(key):
 
 def key_display(name):
     if not name:
-        return "未設定"
+        return "Not set"
     return name.replace("_", " ").upper()
 
 
 def format_seconds(total):
-    """一律以秒數顯示（例如 600，不轉成 10:00）。"""
+    """Always display plain seconds (e.g. 600, never 10:00)."""
     return str(int(total))
 
 
@@ -96,7 +97,7 @@ def truncate(text, limit=12):
 
 
 class Speaker:
-    """使用 Windows 內建語音（SAPI）朗讀提醒，優先選用中文語音。"""
+    """Speak reminders with the built-in Windows voice (SAPI), preferring a Chinese voice."""
 
     SVSF_ASYNC = 1
 
@@ -106,7 +107,7 @@ class Speaker:
             import win32com.client
             self.voice = win32com.client.Dispatch("SAPI.SpVoice")
             voices = list(self.voice.GetVoices())
-            for lang in ("404", "804", "C04"):  # 繁中（台灣）、簡中、繁中（香港）
+            for lang in ("404", "804", "C04"):  # zh-TW, zh-CN, zh-HK
                 match = [v for v in voices if lang in v.GetAttribute("Language").split(";")]
                 if match:
                     self.voice.Voice = match[0]
@@ -121,7 +122,7 @@ class Speaker:
                 return
             except Exception:
                 pass
-        # 無法使用語音時改用系統提示音
+        # Fall back to a system sound when speech is unavailable
         winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
 
 
@@ -135,7 +136,7 @@ def round_rect(canvas, x1, y1, x2, y2, r, **kw):
 
 
 def font(family, px, weight="normal"):
-    """以像素指定字型大小（負值），方便隨卡片等比例縮放。"""
+    """Font sized in pixels (negative size) so it scales with the card."""
     return (family, -max(7, int(px)), weight)
 
 
@@ -150,19 +151,19 @@ def make_icon(canvas, x, y, text, command, px):
 
 
 # ---------------------------------------------------------------------------
-# 計時器卡片
+# Timer card
 # ---------------------------------------------------------------------------
 
 class TimerCard:
     def __init__(self, app, data):
         self.app = app
         self.id = data.get("id") or uuid.uuid4().hex
-        self.name = data.get("name", "計時器")
+        self.name = data.get("name", "Timer")
         self.seconds = int(data.get("seconds", 60))
         self.key = data.get("key")
         self.sound = bool(data.get("sound", True))
-        self.notify = int(data.get("notify", DEFAULT_NOTIFY))  # 剩幾秒時語音提醒
-        # 執行狀態
+        self.notify = int(data.get("notify", DEFAULT_NOTIFY))  # seconds left for voice reminder
+        # Runtime state
         self.start = None
         self.run_seconds = self.seconds
         self.cycle = 0
@@ -175,7 +176,7 @@ class TimerCard:
         self.resize(BASE_W)
 
     def resize(self, w):
-        """依卡片寬度重新繪製所有元素。"""
+        """Redraw every element for the given card width."""
         if w == self.width:
             return
         self.width = w
@@ -186,19 +187,19 @@ class TimerCard:
         c.configure(width=w, height=h)
 
         round_rect(c, 1, 1, w - 1, h - 1, 18 * s, fill=CARD_BG, outline=CARD_BORDER, width=1)
-        # 大數字
+        # Big number
         self.num = c.create_text(w / 2, 82 * s, text="--", fill=COLOR_IDLE)
-        # 細進度條
+        # Thin progress bar
         self.bar_x1, self.bar_x2 = 22 * s, w - 22 * s
         bar_y1, bar_y2 = 142 * s, 142 * s + max(2, 3 * s)
         c.create_rectangle(self.bar_x1, bar_y1, self.bar_x2, bar_y2, fill=RING_TRACK, width=0)
         self.bar = c.create_rectangle(self.bar_x1, bar_y1, self.bar_x1, bar_y2,
                                       fill=COLOR_RUN, width=0)
-        # 名稱與按鍵
+        # Name and key
         self.title = c.create_text(w / 2, 170 * s, fill=TEXT_MAIN,
                                    font=font(FONT_UI, 27 * s, "bold"))
         self.key_text = c.create_text(w / 2, 199 * s, fill=TEXT_SUB, font=font(FONT_UI, 15 * s))
-        # 圖示按鈕（只能用滑鼠操作）
+        # Icon buttons (mouse only)
         make_icon(c, 18 * s, 18 * s, "■", self.stop, px=13 * s)
         make_icon(c, w - 18 * s, 18 * s, "⚙", lambda: SettingsDialog(self.app, self), px=17 * s)
 
@@ -209,17 +210,17 @@ class TimerCard:
         self.canvas.itemconfigure(self.title, text=truncate(self.name))
         sound = "" if self.sound else "  🔇"
         self.canvas.itemconfigure(
-            self.key_text, text=f"按鍵 {key_display(self.key)} ・ {self.seconds} 秒{sound}"
+            self.key_text, text=f"Key {key_display(self.key)} · {self.seconds}s{sound}"
         )
 
     def to_dict(self):
         return {"id": self.id, "name": self.name, "seconds": self.seconds,
                 "key": self.key, "sound": self.sound, "notify": self.notify}
 
-    # --- 計時 ---------------------------------------------------------------
+    # --- Timing -------------------------------------------------------------
 
     def trigger(self):
-        """每次按下觸發按鍵，都從目標秒數重新開始倒數。"""
+        """Every press of the trigger key restarts the countdown from the target."""
         self.run_seconds = self.seconds
         self.start = time.monotonic()
         self.cycle = 0
@@ -247,13 +248,13 @@ class TimerCard:
             return
 
         elapsed = now - self.start
-        # 倒數到 0 後自動重新開始
+        # Restart automatically after reaching 0
         cycle = int(elapsed // self.run_seconds)
         left = self.run_seconds - (elapsed - cycle * self.run_seconds)
-        # 四捨五入：一輪剛好等於目標秒數，會顯示目標秒數 → 0
+        # Round half up: one cycle equals exactly the target, displayed as target -> 0
         shown = math.floor(left + 0.5)
 
-        # 剩 10 秒時語音提醒（每輪一次；目標秒數需大於 10 秒）
+        # Voice reminder once per cycle (target must be longer than the reminder time)
         if (self.sound and self.run_seconds > self.notify
                 and shown <= self.notify and self.announced != cycle):
             self.announced = cycle
@@ -270,7 +271,7 @@ class TimerCard:
 
 
 # ---------------------------------------------------------------------------
-# 設定視窗
+# Settings dialog
 # ---------------------------------------------------------------------------
 
 class SettingsDialog(tk.Toplevel):
@@ -280,7 +281,7 @@ class SettingsDialog(tk.Toplevel):
         self.card = card
         self.new_key = card.key
 
-        self.title("計時器設定")
+        self.title("Timer Settings")
         self.resizable(False, False)
         self.transient(app.root)
 
@@ -292,38 +293,37 @@ class SettingsDialog(tk.Toplevel):
         self.sound_var = tk.BooleanVar(value=card.sound)
         self.notify_var = tk.StringVar(value=str(card.notify))
 
-        ttk.Label(body, text="名稱").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Label(body, text="Name").grid(row=0, column=0, sticky="w", pady=6, padx=(0, 10))
         name_entry = ttk.Entry(body, textvariable=self.name_var, width=22)
         name_entry.grid(row=0, column=1, sticky="we", pady=6)
 
-        ttk.Label(body, text="倒數秒數").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Label(body, text="Seconds").grid(row=1, column=0, sticky="w", pady=6, padx=(0, 10))
         ttk.Spinbox(body, from_=MIN_SECONDS, to=MAX_SECONDS, textvariable=self.seconds_var,
                     width=10).grid(row=1, column=1, sticky="w", pady=6)
 
-        ttk.Label(body, text="觸發按鍵").grid(row=2, column=0, sticky="w", pady=6)
-        self.key_btn = ttk.Button(body, text=key_display(self.new_key), width=16,
+        ttk.Label(body, text="Trigger key").grid(row=2, column=0, sticky="w", pady=6, padx=(0, 10))
+        self.key_btn = ttk.Button(body, text=key_display(self.new_key), width=22,
                                   command=self.capture_key)
         self.key_btn.grid(row=2, column=1, sticky="w", pady=6)
 
-        ttk.Label(body, text="語音提醒").grid(row=3, column=0, sticky="w", pady=6)
-        ttk.Checkbutton(body, text="開啟（唸「注意 名稱」）", variable=self.sound_var,
+        ttk.Label(body, text="Voice alert").grid(row=3, column=0, sticky="w", pady=6, padx=(0, 10))
+        ttk.Checkbutton(body, text="On (says \"注意 <name>\")", variable=self.sound_var,
                         command=self.update_notify_state).grid(row=3, column=1, sticky="w", pady=6)
 
-        ttk.Label(body, text="提醒時間").grid(row=4, column=0, sticky="w", pady=6)
+        ttk.Label(body, text="Alert at").grid(row=4, column=0, sticky="w", pady=6, padx=(0, 10))
         notify_row = ttk.Frame(body)
         notify_row.grid(row=4, column=1, sticky="w", pady=6)
-        ttk.Label(notify_row, text="剩").pack(side="left")
         self.notify_spin = ttk.Spinbox(notify_row, from_=0, to=MAX_SECONDS,
                                        textvariable=self.notify_var, width=6)
-        self.notify_spin.pack(side="left", padx=4)
-        ttk.Label(notify_row, text="秒時提醒").pack(side="left")
+        self.notify_spin.pack(side="left")
+        ttk.Label(notify_row, text="seconds left").pack(side="left", padx=4)
         self.update_notify_state()
 
         btns = ttk.Frame(body)
         btns.grid(row=5, column=0, columnspan=2, sticky="we", pady=(14, 0))
-        ttk.Button(btns, text="刪除計時器", command=self.delete).pack(side="left")
-        ttk.Button(btns, text="儲存", command=self.save).pack(side="right")
-        ttk.Button(btns, text="取消", command=self.close).pack(side="right", padx=6)
+        ttk.Button(btns, text="Delete timer", command=self.delete).pack(side="left")
+        ttk.Button(btns, text="Save", command=self.save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self.close).pack(side="right", padx=6)
 
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Return>", lambda e: self.save())
@@ -339,7 +339,7 @@ class SettingsDialog(tk.Toplevel):
         self.notify_spin.configure(state="normal" if self.sound_var.get() else "disabled")
 
     def capture_key(self):
-        self.key_btn.configure(text="請按任意鍵…（Esc 取消）")
+        self.key_btn.configure(text="Press any key… (Esc to cancel)")
         self.app.begin_capture(self.on_key_captured)
 
     def on_key_captured(self, name):
@@ -353,7 +353,8 @@ class SettingsDialog(tk.Toplevel):
         except ValueError:
             seconds = 0
         if not MIN_SECONDS <= seconds <= MAX_SECONDS:
-            messagebox.showerror("秒數錯誤", f"請輸入 {MIN_SECONDS} ~ {MAX_SECONDS} 之間的整數",
+            messagebox.showerror("Invalid seconds",
+                                 f"Please enter a whole number from {MIN_SECONDS} to {MAX_SECONDS}.",
                                  parent=self)
             return
         card = self.card
@@ -364,11 +365,12 @@ class SettingsDialog(tk.Toplevel):
             except ValueError:
                 notify = -1
             if not 0 <= notify < seconds:
-                messagebox.showerror("提醒時間錯誤",
-                                     f"提醒時間請輸入 0 ~ {seconds - 1} 之間的整數\n"
-                                     f"（需小於倒數秒數 {seconds} 秒）", parent=self)
+                messagebox.showerror("Invalid alert time",
+                                     f"Alert time must be a whole number from 0 to {seconds - 1}\n"
+                                     f"(less than the countdown of {seconds} seconds).",
+                                     parent=self)
                 return
-        card.name = self.name_var.get().strip() or "計時器"
+        card.name = self.name_var.get().strip() or "Timer"
         card.seconds = seconds
         card.key = self.new_key
         card.sound = self.sound_var.get()
@@ -378,7 +380,7 @@ class SettingsDialog(tk.Toplevel):
         self.close()
 
     def delete(self):
-        if messagebox.askyesno("刪除計時器", f"確定要刪除「{self.card.name}」嗎？", parent=self):
+        if messagebox.askyesno("Delete timer", f"Delete \"{self.card.name}\"?", parent=self):
             self.app.remove_timer(self.card)
             self.close()
 
@@ -389,7 +391,7 @@ class SettingsDialog(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
-# 主程式
+# Main application
 # ---------------------------------------------------------------------------
 
 class App:
@@ -403,17 +405,17 @@ class App:
 
         self.speaker = Speaker()
 
-        root.title("HotkeyTimer（右鍵新增）")
+        root.title("HotkeyTimer (right-click to add)")
         root.geometry("460x220")
         root.minsize(160, 120)
         root.configure(bg=BG)
 
-        # 卡片區：所有卡片排成一列，隨視窗大小等比例縮放
+        # Card area: all cards in one row, scaled with the window
         self.view = tk.Frame(root, bg=BG)
         self.view.pack(fill="both", expand=True)
         self.view.bind("<Configure>", lambda e: self.layout())
         self.view.bind("<Button-3>", lambda e: self.show_menu(e))
-        self.empty = tk.Label(self.view, text="按滑鼠右鍵新增計時器",
+        self.empty = tk.Label(self.view, text="Right-click to add a timer",
                               bg=BG, fg=TEXT_SUB, font=(FONT_UI, 10))
         self.empty.bind("<Button-3>", lambda e: self.show_menu(e))
 
@@ -427,7 +429,7 @@ class App:
         for data in config.get("timers", []):
             self.add_timer(data, open_settings=False)
         if not self.timers:
-            self.add_timer({"name": "計時器 1", "seconds": 60, "key": "f1"}, open_settings=False)
+            self.add_timer({"name": "Timer 1", "seconds": 60, "key": "f1"}, open_settings=False)
         self._loading = False
         self.save()
 
@@ -438,7 +440,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.loop()
 
-    # --- 版面 ---------------------------------------------------------------
+    # --- Layout -------------------------------------------------------------
 
     def layout(self):
         n = len(self.timers)
@@ -456,7 +458,7 @@ class App:
             t.resize(w)
             t.canvas.place(x=x0 + i * (w + CARD_GAP), y=y0, width=w, height=h)
 
-    # --- 設定檔 -------------------------------------------------------------
+    # --- Config file --------------------------------------------------------
 
     def load(self):
         try:
@@ -477,11 +479,11 @@ class App:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, CONFIG_PATH)
 
-    # --- 計時器管理 ---------------------------------------------------------
+    # --- Timer management ---------------------------------------------------
 
     def add_timer(self, data=None, open_settings=True):
         if data is None:
-            data = {"name": f"計時器 {len(self.timers) + 1}", "seconds": 60, "key": None}
+            data = {"name": f"Timer {len(self.timers) + 1}", "seconds": 60, "key": None}
         card = TimerCard(self, data)
         self.timers.append(card)
         self.layout()
@@ -499,15 +501,15 @@ class App:
     def show_menu(self, event, card=None):
         menu = tk.Menu(self.root, tearoff=0)
         if card is not None:
-            menu.add_command(label=f"設定「{truncate(card.name)}」",
+            menu.add_command(label=f"Settings: {truncate(card.name)}",
                              command=lambda: SettingsDialog(self, card))
-            menu.add_command(label="停止", command=card.stop)
+            menu.add_command(label="Stop", command=card.stop)
             menu.add_separator()
-        menu.add_command(label="＋ 新增計時器", command=self.add_timer)
+        menu.add_command(label="+ Add timer", command=self.add_timer)
         menu.add_separator()
-        menu.add_checkbutton(label="視窗置頂", variable=self.topmost_var,
+        menu.add_checkbutton(label="Always on top", variable=self.topmost_var,
                              command=self.on_window_option)
-        menu.add_command(label=f"透明度…（{self.alpha_var.get()}%）",
+        menu.add_command(label=f"Opacity… ({self.alpha_var.get()}%)",
                          command=lambda: self.open_alpha_window(event.x_root, event.y_root))
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -523,12 +525,12 @@ class App:
         self.save()
 
     def open_alpha_window(self, x, y):
-        """透明度滑桿：拖動時即時套用，放開或關閉時儲存。"""
+        """Opacity slider: applied live while dragging, saved on release or close."""
         if self.alpha_win is not None and self.alpha_win.winfo_exists():
             self.alpha_win.lift()
             return
         win = self.alpha_win = tk.Toplevel(self.root)
-        win.title("透明度")
+        win.title("Opacity")
         win.resizable(False, False)
         win.transient(self.root)
         win.attributes("-topmost", True)
@@ -563,12 +565,12 @@ class App:
     def cancel_capture(self):
         self.capture_cb = None
 
-    # --- 鍵盤事件（pynput 執行緒 → 主執行緒）---------------------------------
+    # --- Keyboard events (pynput thread -> main thread) ---------------------
 
     def _on_press(self, key):
         name = key_to_name(key)
         if name is None or name in self.pressed:
-            return  # 忽略按住不放時的自動重複
+            return  # ignore auto-repeat while a key is held down
         self.pressed.add(name)
         self.events.put(name)
 
@@ -580,7 +582,7 @@ class App:
             cb, self.capture_cb = self.capture_cb, None
             cb(None if name == "esc" else name)
             return
-        # 在本程式的輸入框打字時不觸發計時器
+        # Don't trigger timers while typing in this app's input fields
         if isinstance(self.root.focus_get(), (tk.Entry, ttk.Entry, ttk.Spinbox, tk.Spinbox)):
             return
         for t in self.timers:
