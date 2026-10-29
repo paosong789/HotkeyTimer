@@ -14,6 +14,7 @@ import json
 import math
 import os
 import queue
+import sys
 import time
 import tkinter as tk
 import uuid
@@ -22,7 +23,11 @@ from tkinter import messagebox, ttk
 
 from pynput import keyboard
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # Packaged exe: keep config.json next to the exe (not in the temp unpack dir)
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 
 MIN_SECONDS = 1

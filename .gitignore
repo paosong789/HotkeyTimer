@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 config.json
 config.json.tmp
+build/
+dist/
+*.spec
